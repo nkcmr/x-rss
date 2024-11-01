@@ -1,19 +1,31 @@
 {
-  "name": "rss-view",
-  "version": "0.0.0",
-  "private": true,
-  "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
-    "start": "wrangler dev",
-    "test": "vitest",
-    "cf-typegen": "wrangler types"
-  },
-  "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.5.2",
-    "@cloudflare/workers-types": "^4.20241022.0",
-    "typescript": "^5.5.2",
-    "vitest": "2.0.5",
-    "wrangler": "^3.60.3"
-  }
+	"name": "rss-view",
+	"version": "0.0.0",
+	"private": true,
+	"scripts": {
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev",
+		"start": "wrangler dev",
+		"test": "vitest",
+		"cf-typegen": "wrangler types",
+		"fe-bundle": "esbuild --bundle ./src/csr.tsx --outfile=./build/build.js --tree-shaking=true --minify --sourcemap=external",
+		"fe-build": "rm -rf build && mkdir build && npm run fe-bundle",
+		"fe-dev": "esbuild --bundle ./src/csr.tsx --outfile=./build/build.js --sourcemap=inline --watch"
+	},
+	"devDependencies": {
+		"@cloudflare/puppeteer": "^0.0.14",
+		"@cloudflare/vitest-pool-workers": "^0.5.2",
+		"@cloudflare/workers-types": "^4.20241022.0",
+		"@types/react": "^18.3.12",
+		"@types/react-dom": "^18.3.1",
+		"esbuild": "^0.24.0",
+		"react": "^18.3.1",
+		"react-dom": "^18.3.1",
+		"typescript": "^5.5.2",
+		"vitest": "2.0.5",
+		"wrangler": "^3.60.3"
+	},
+	"dependencies": {
+		"p-limit": "^6.1.0"
+	}
 }

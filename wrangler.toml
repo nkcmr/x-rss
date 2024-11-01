@@ -1,8 +1,18 @@
 #:schema node_modules/wrangler/config-schema.json
 name = "rss-view"
-main = "src/index.ts"
+main = "src/index.tsx"
 compatibility_date = "2024-10-22"
 compatibility_flags = ["nodejs_compat"]
+upload_source_maps = true
+
+route = { pattern = "x-rss.nkcmr.dev", custom_domain = true }
+browser = { binding = "MAIN_BROWSER" }
+
+[triggers]
+crons = ["1,16,31,46 * * * *"]
+
+[vars]
+HEALTHCHECK_ID = "033e398e-8a13-4a4e-a2e3-589e703978aa"
 
 # Workers Logs
 # Docs: https://developers.cloudflare.com/workers/observability/logs/workers-logs/
@@ -74,9 +84,10 @@ enabled = true
 
 # Bind a KV Namespace. Use KV as persistent storage for small key-value pairs.
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#kv-namespaces
-# [[kv_namespaces]]
-# binding = "MY_KV_NAMESPACE"
-# id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+[[kv_namespaces]]
+binding = "tweet_cache"
+id = "a38c17c47f3248b8b622b64e8abd4cea"
+preview_id = "03108c239054419799804a88281fbd82"
 
 # Bind an mTLS certificate. Use to present a client certificate when communicating with another service.
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#mtls-certificates
@@ -97,9 +108,10 @@ enabled = true
 
 # Bind an R2 Bucket. Use R2 to store arbitrarily large blobs of data, such as files.
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#r2-buckets
-# [[r2_buckets]]
-# binding = "MY_BUCKET"
-# bucket_name = "my-bucket"
+[[r2_buckets]]
+binding = "SCREENSHOTS"
+preview_bucket_name = "screenshots-dev"
+bucket_name = "screenshots-dev"
 
 # Bind another Worker service. Use this binding to call another Worker without network overhead.
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings

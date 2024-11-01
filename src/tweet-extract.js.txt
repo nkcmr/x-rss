@@ -1,0 +1,195 @@
+// @ts-check
+
+/**
+ * @param el {Node}
+ * @returns {string}
+ */
+function getStructure(el) {
+	let c = el;
+	let struct = [];
+	while (c) {
+		struct.push(c.nodeName);
+		if (c.childNodes.length !== 1) {
+			break;
+		}
+		c = c.childNodes[0];
+	}
+	return struct.join('::');
+}
+
+/**
+ *
+ * @param el {Node}
+ * @param where {(el: Node) => boolean}
+ */
+function nearestParentWhere(el, where) {
+	/** @type {Node|null} */
+	let c = el.parentNode;
+	while (c && !where(c)) {
+		c = c.parentNode;
+	}
+	return c;
+}
+
+/**
+ * @param is {string}
+ * @returns {(el: Node) => boolean}
+ */
+function whereNodeName(is) {
+	return (el) => {
+		return el.nodeName === is;
+	};
+}
+
+function extractProfile() {
+	const descriptionEl = document.querySelector('[data-testid=UserDescription]');
+	if (!descriptionEl) {
+		throw new Error(`unable to find user description`);
+	}
+	const descriptionChunks = extractTextChunks(descriptionEl);
+	return {
+		description_chunks: descriptionChunks,
+	};
+}
+
+/**
+ * @param ms {number}
+ * @returns {Promise<void>}
+ */
+function sleep(ms) {
+	return new Promise((resolve) => {
+		setTimeout(resolve, ms);
+	});
+}
+
+/**
+ *
+ * @param el {Node}
+ */
+function extractTextChunks(el) {
+	const chunks = [];
+	for (let ttcel of el.childNodes) {
+		const struct = getStructure(ttcel);
+		switch (struct) {
+			case 'SPAN::#text':
+				chunks.push({ type: 'text', content: ttcel.textContent });
+				break;
+			case 'DIV::SPAN::A::#text':
+				if ((ttcel.textContent ?? '').trim().startsWith('@')) {
+					chunks.push({ type: 'mention', user: (ttcel.textContent ?? '').trim(), content: ttcel.textContent });
+				} else {
+					throw new Error(`${struct} was not a mention as expected`);
+				}
+				break;
+			case 'SPAN::A::#text':
+				/** @type {*} */
+				const anchorEl = ttcel.childNodes[0];
+				if (anchorEl.textContent.charAt(0) === '#') {
+					chunks.push({ type: 'hashtag', hashtag: anchorEl.textContent, link: anchorEl.href });
+				} else {
+					throw new Error('SPAN::A::#text was not a hashtag like expected');
+				}
+				break;
+			case 'A':
+				/** @type {*} */
+				let linkEl = ttcel;
+				chunks.push({ type: 'link', href: linkEl.href });
+				break;
+			case 'IMG':
+				/** @type {*} */
+				let imgEl = ttcel;
+				if (imgEl.src.includes('/emoji/')) {
+					chunks.push({ type: 'emoji', content: imgEl.alt, description: imgEl.title });
+				} else {
+					throw new Error(`${struct} was not an emoji as expected`);
+				}
+				break;
+			default:
+				throw new Error(`unexpected tweet text structure: ${struct}`);
+		}
+	}
+	return chunks;
+}
+
+/**
+ *
+ * @param tweetEl {Element}
+ * @returns {Promise<Record<string, any>|null>}
+ */
+async function extractTweet(tweetEl) {
+	let repost = false;
+	const socialContext = tweetEl.querySelector('[data-testid=socialContext]');
+	if (socialContext) {
+		if (socialContext.textContent?.toLowerCase().endsWith(' reposted')) {
+			repost = true;
+		} else if (socialContext.textContent?.toLowerCase().includes('pinned')) {
+			return null;
+		}
+	}
+
+	tweetEl.scrollIntoView();
+	await sleep(500);
+	const tweetTextEl = tweetEl.querySelector('[data-testid=tweetText]');
+	if (!tweetTextEl) {
+		throw new Error('no tweet text found');
+	}
+	const textChunks = extractTextChunks(tweetTextEl);
+
+	const time = tweetEl.querySelector('time');
+	if (!time) {
+		throw new Error(`missing <time> element in tweet`);
+	}
+
+	const tweetAnchor = nearestParentWhere(time, whereNodeName('A'));
+	if (!tweetAnchor) {
+		throw new Error(`could not find tweet link as parent of <time>`);
+	}
+
+	const media = [];
+	const tweetPhoto = tweetEl.querySelector('[data-testid=tweetPhoto]');
+	if (tweetPhoto) {
+		const img = tweetPhoto.querySelector('img');
+		const video = tweetPhoto.querySelector('video');
+		if (img) {
+			media.push({
+				type: 'photo',
+				src: img.src,
+				alt: img.alt,
+			});
+		} else if (video) {
+			const isGif = [...tweetPhoto.querySelectorAll('span')].findIndex((el) => (el.textContent ?? '').toLowerCase() === 'gif') >= 0;
+			media.push({
+				type: 'video',
+				src: video.src,
+				poster: video.poster,
+				gif: isGif,
+			});
+		}
+	}
+
+	return {
+		// @ts-ignore
+		link: tweetAnchor.href,
+		timestamp: time.dateTime,
+		text_chunks: textChunks,
+		repost,
+		media: media,
+	};
+}
+
+async function extractTweets() {
+	const tweets = [];
+
+	let tweetEl = document.querySelector('[data-testid=tweet]');
+	while (tweetEl && tweets.length < 15) {
+		// @ts-ignore
+		tweetEl.dataset.extracted = 'true';
+		const tweet = await extractTweet(tweetEl);
+		if (tweet) {
+			tweets.push(tweet);
+		}
+		tweetEl = document.querySelector(`[data-testid=tweet]:not([data-extracted])`);
+	}
+
+	return tweets;
+}
