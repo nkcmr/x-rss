@@ -1,0 +1,13 @@
+{
+	"extends": "./tsconfig.json",
+	"include": ["./src/tweet-extract.ts"],
+	"compilerOptions": {
+		"lib": ["ES2023", "DOM", "DOM.Iterable"],
+		"types": ["./src/tweet.d.ts"],
+		"noEmit": false,
+		"module": "Preserve",
+		"moduleResolution": "Bundler",
+		"isolatedModules": false,
+		"resolveJsonModule": false
+	}
+}

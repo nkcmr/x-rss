@@ -1,66 +1,14 @@
 import puppeteer, { Browser, Page } from '@cloudflare/puppeteer';
+import fxp from 'fast-xml-parser';
 import pLimit from 'p-limit';
 import { Fragment, ReactNode } from 'react';
 import { renderToString } from 'react-dom/server';
 import { reportHealthcheck } from './hc';
+import { Profile, TextChunk, Tweet } from './tweet';
 import tweetExtractJS from './tweet-extract.js.txt';
 type ExtractResult = {
 	profile: Profile;
 	tweets: Tweet[];
-};
-
-type Tweet = {
-	timestamp: string; // rfc3339
-	text_chunks: TextChunk[];
-	repost?: boolean;
-	media: (
-		| {
-				type: 'photo';
-				src: string;
-				alt: string;
-		  }
-		| {
-				type: 'video';
-				src: string;
-				poster: string;
-				gif: boolean;
-		  }
-	)[];
-	link: string;
-};
-
-type Profile = {
-	description_chunks: TextChunk[];
-};
-
-type TextChunk = ChunkPlainText | ChunkMention | ChunkHashtag | ChunkLink | ChunkEmoji;
-
-type ChunkPlainText = {
-	type: 'text';
-	content: string;
-};
-
-type ChunkMention = {
-	type: 'mention';
-	user: `@${string}`;
-	content: string;
-};
-
-type ChunkHashtag = {
-	type: 'hashtag';
-	hashtag: `#${string}`;
-	link: string;
-};
-
-type ChunkLink = {
-	type: 'link';
-	href: string;
-};
-
-type ChunkEmoji = {
-	type: 'emoji';
-	content: string;
-	description: string;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -85,16 +33,21 @@ async function extractTweets(env: Env, b: Browser, username: string): Promise<Ex
 		console.log('extractTweets: setting up extraction code', { username });
 		await page.evaluate(tweetExtractJS);
 
+		console.log('extractTweets: waiting for UserDescription', { username });
 		await page.waitForSelector('[data-testid=UserDescription]');
 		const profile: Profile = (await page.evaluate('extractProfile()')) as any;
 
+		console.log('extractTweets: waiting for tweets', { username });
 		await page.waitForSelector('[data-testid=tweet]');
 		await sleep(1_000);
 
-		await env.SCREENSHOTS.put(`${Date.now()}.png`, await page.screenshot());
+		console.log('extractTweets: running extract tweets', { username });
 
-		const tweets: any = await page.evaluate('extractTweets()');
-		console.log('extractTweets', { tweet_count: tweets.length });
+		const tweets = await Promise.race([sleep(60_000), page.evaluate('extractTweets()') as Promise<Tweet[]>]);
+		if (!tweets) {
+			throw new Error(`timeout occurred while extracting tweets`);
+		}
+		console.log('extractTweets', { username, tweet_count: tweets.length });
 
 		tweets.sort((a: Tweet, b: Tweet) => {
 			return Date.parse(b.timestamp) - Date.parse(a.timestamp);
@@ -105,9 +58,31 @@ async function extractTweets(env: Env, b: Browser, username: string): Promise<Ex
 		// 	content: tweetExtractJS,
 		// });
 
+		const maxUnwrap = pLimit(3);
+
 		return {
 			profile,
-			tweets: tweets,
+			tweets: await Promise.all(
+				tweets.map(async (tweet): Promise<Tweet> => {
+					return {
+						...tweet,
+						text_chunks: await Promise.all(
+							tweet.text_chunks.map((chunk): Promise<TextChunk> => {
+								if (chunk.type === 'link') {
+									return maxUnwrap(async () => {
+										const unwrappedHref = await unwrapLink(env, chunk.href);
+										return {
+											...chunk,
+											href: unwrappedHref,
+										};
+									});
+								}
+								return Promise.resolve(chunk);
+							})
+						),
+					};
+				})
+			),
 		};
 	} finally {
 		await page?.close();
@@ -124,10 +99,66 @@ async function useBrowser<T = void>(env: Env, ctx: ExecutionContext, buf: (b: Br
 	}
 }
 
+function tweetLinkExplode(link: string): [username: string, id: string] | [username: string, null] | [null, null] {
+	const uri = URL.parse(link);
+	if (!uri) {
+		return [null, null];
+	}
+	switch (uri.hostname) {
+		case 'x.com':
+		case 'twitter.com':
+			const [, username, statusWord, id] = uri.pathname.split('/');
+			if (!username) {
+				return [null, null];
+			}
+			if (typeof statusWord === 'undefined') {
+				return [username, null];
+			}
+			if (statusWord === 'status') {
+				return [username, id];
+			}
+			return [null, null];
+	}
+	return [null, null];
+}
+
+function tweetDataKey(username: string, id: string): string {
+	return `tweet/u:${username.toLowerCase()}/id:${id}`;
+}
+
+function timelineDataKey(username: string): string {
+	return `timeline:${username.toLowerCase()}`;
+}
+
+function profileDataKey(username: string): string {
+	return `profile:${username.toLowerCase()}`;
+}
+
+type TweetPtr = ['repost' | 'post', string];
+
 async function updateTweetsCache(env: Env, b: Browser, username: string): Promise<void> {
 	const result = await extractTweets(env, b, username);
+	const timeline = await Promise.all(
+		result.tweets.map(async (tweet): Promise<TweetPtr> => {
+			const [username, id] = tweetLinkExplode(tweet.link);
+			if (!username || !id) {
+				throw new Error(`failed to explode tweet link: ${tweet.link}`);
+			}
+
+			const isRepost = tweet.repost;
+			delete tweet.repost;
+			const key = tweetDataKey(username, id);
+			return env.tweet_cache.put(key, JSON.stringify(tweet)).then(() => {
+				return [isRepost ? 'repost' : 'post', key];
+			});
+		})
+	);
 	console.log('got tweets, saving to cache', { username });
-	await env.tweet_cache.put(`tweets:${username}`, JSON.stringify(result));
+	await Promise.all([
+		env.tweet_cache.put(profileDataKey(username), JSON.stringify(result.profile)),
+		env.tweet_cache.put(`tweets:${username}`, JSON.stringify(result)),
+		env.tweet_cache.put(timelineDataKey(username), JSON.stringify(timeline)),
+	]);
 }
 
 function renderPlainText(chunks: TextChunk[]): string {
@@ -154,7 +185,7 @@ function renderPlainText(chunks: TextChunk[]): string {
 	return textContent;
 }
 
-function renderHTML(chunks: TextChunk[]): string {
+function renderHTML(chunks: TextChunk[]): ReactNode {
 	const nodes: ReactNode[] = [];
 	let currentParagraph: ReactNode[] = [];
 	for (let i = 0; i < chunks.length; i++) {
@@ -165,14 +196,14 @@ function renderHTML(chunks: TextChunk[]): string {
 				break;
 			case 'hashtag':
 				currentParagraph.push(
-					<a key={`chunk-${i}`} href={chunk.link}>
+					<a key={`chunk-${i}`} href={chunk.link} rel="noopener noreferrer nofollow" target="_blank">
 						{chunk.hashtag}
 					</a>
 				);
 				break;
 			case 'link':
 				currentParagraph.push(
-					<a key={`chunk-${i}`} href={chunk.href}>
+					<a key={`chunk-${i}`} href={chunk.href} rel="noopener noreferrer nofollow" target="_blank">
 						{chunk.href}
 					</a>
 				);
@@ -180,7 +211,7 @@ function renderHTML(chunks: TextChunk[]): string {
 			case 'mention':
 				const noAtUsername = chunk.user.slice(1);
 				currentParagraph.push(
-					<a key={`chunk-${i}`} href={`https://x.com/${noAtUsername}`}>
+					<a key={`chunk-${i}`} href={`https://x.com/${noAtUsername}`} rel="noopener noreferrer nofollow" target="_blank">
 						{chunk.user}
 					</a>
 				);
@@ -203,7 +234,7 @@ function renderHTML(chunks: TextChunk[]): string {
 		// currentParagraph = [];
 	}
 
-	return renderToString(
+	return (
 		<>
 			{nodes.map((n, i) => (
 				<Fragment key={i}>{n}</Fragment>
@@ -212,109 +243,352 @@ function renderHTML(chunks: TextChunk[]): string {
 	);
 }
 
+function renderAtomFeed(properUsername: string, tweets: ExtractResult, opts: { debug?: boolean }): Response {
+	const b = new fxp.XMLBuilder({ ignoreAttributes: false, format: true, unpairedTags: ['link'] });
+
+	const updated = tweets.tweets[0].timestamp;
+	const entries: any[] = [];
+
+	for (let t of tweets.tweets) {
+		let titleParts = [];
+		for (let c of t.text_chunks) {
+			switch (c.type) {
+				case 'text':
+					let t = c.content.trim();
+					if (t.length === 0) {
+						continue;
+					}
+					t = t.replaceAll(/\s*\n+\s*/g, ' ');
+					titleParts.push(t);
+					break;
+				case 'hashtag':
+					titleParts.push(c.hashtag);
+					break;
+				case 'link':
+					titleParts.push(c.href);
+					break;
+				case 'emoji':
+					titleParts.push(c.content);
+					break;
+				case 'mention':
+					titleParts.push(c.content);
+					break;
+			}
+		}
+
+		let mediaFooter = '';
+		if (t.media.length > 0) {
+			const top = t.media[0];
+			if (top.type === 'photo') {
+				mediaFooter += renderToString(
+					<>
+						<br />
+						<img src={top.src} alt={top.alt} />
+					</>
+				);
+			}
+		}
+
+		let xrssdebug = undefined;
+		if (opts.debug) {
+			xrssdebug = t;
+		}
+
+		const [username, id] = tweetLinkExplode(t.link);
+		if (!username || !id) {
+			throw new Error('invalid tweet link');
+		}
+
+		if (t.repost) {
+			titleParts = [`🔁 @${properUsername} reposted:`, ...titleParts];
+		}
+
+		entries.push({
+			id: {
+				'#text': t.link,
+			},
+			title: {
+				'#text': titleParts.join(' '),
+			},
+			updated: {
+				'#text': t.timestamp,
+			},
+			link: {
+				'@_href': `https://x-rss.nkcmr.dev/${username}/status/${id}`,
+				'@_rel': 'alternate',
+				'@_/': true,
+			},
+			content: {
+				'@_type': 'html',
+				'#text': renderToString(renderHTML(t.text_chunks)) + mediaFooter,
+			},
+			xrssdebug,
+			author: {
+				name: `${t.author.name} (@${username})`,
+				uri: t.author.url,
+			},
+		});
+	}
+
+	const icon = tweets.profile.avatarImage
+		? {
+				'#text': tweets.profile.avatarImage,
+		  }
+		: undefined;
+
+	const rawXML = b.build({
+		'?xml': {
+			'@_version': '1.0',
+			'@_encoding': 'utf-8',
+		},
+		feed: {
+			'@_xmlns': 'http://www.w3.org/2005/Atom',
+			id: {
+				'#text': `https://x.com/${properUsername}`,
+			},
+			icon,
+			title: {
+				'#text': `@${properUsername}`,
+			},
+			subtitle: {
+				'@_type': 'html',
+				'#text': renderToString(renderHTML(tweets.profile.description_chunks)),
+			},
+			link: [
+				{
+					'@_href': `https://x-rss.nkcmr.dev/${properUsername}.rss`,
+					'@_rel': 'self',
+					'@_/': true,
+				},
+				{
+					'@_href': `https://x.com/${properUsername}`,
+					'@_rel': 'alternate',
+					'@_/': true,
+				},
+			],
+			updated: {
+				'#text': updated,
+			},
+			entry: entries,
+		},
+	});
+
+	return new Response(rawXML, {
+		headers: {
+			'Content-Type': 'application/atom+xml',
+		},
+	});
+}
+
+function renderJSONFeed(properUsername: string, tweets: ExtractResult, { debug }: { debug?: boolean }): Response {
+	const jsonFeed = {
+		version: 'https://jsonfeed.org/version/1.1',
+		title: `@${properUsername}`,
+		home_page_url: `https://x.com/${properUsername}`,
+		feed_url: `https://x-rss.nkcmr.dev/${properUsername}.json`,
+		description: renderPlainText(tweets.profile.description_chunks),
+		items: [] as any[],
+	};
+
+	for (let t of tweets.tweets) {
+		if (t.repost) {
+			continue;
+		}
+		let textContent = renderPlainText(t.text_chunks);
+		let image: string | undefined;
+
+		if (t.media.length > 0) {
+			const [top] = t.media;
+			if (top.type === 'photo') {
+				image = top.src;
+			} else if (top.type === 'video' && top.poster) {
+				image = top.poster;
+			}
+		}
+
+		const debugData = debug ? { tweets: t } : undefined;
+
+		jsonFeed.items.push({
+			id: t.link,
+			url: t.link,
+			date_published: t.timestamp,
+			// content_text: textContent,
+			content_html: renderToString(renderHTML(t.text_chunks)),
+			_x_rss_debug: debugData,
+			image: image,
+		});
+	}
+	return new Response(JSON.stringify(jsonFeed, null, 2), {
+		headers: {
+			'Content-Type': 'application/feed+json',
+		},
+	});
+}
+
+function respondHTML(body: BodyInit) {
+	return new Response(body, {
+		headers: {
+			'Content-Type': 'text/html; charset=utf-8',
+		},
+	});
+}
+
+async function unwrapLink(env: Env, link: string): Promise<string> {
+	type LinkHop =
+		| {
+				seq: number;
+				location: { original: string };
+				status_code?: number;
+				final: false;
+		  }
+		| {
+				seq: number;
+				location: { original: string; cleaned?: string; removed_params: string[] };
+				status_code?: number;
+				error?: string;
+				final: true;
+		  };
+	interface LinkUnwrapAPI {
+		follow(link: string): Promise<LinkHop[]>;
+	}
+	const hops = await (env.LINK_UNWRAP as Fetcher & LinkUnwrapAPI).follow(btoa(link));
+	for (let h of hops.reverse()) {
+		if (!h.final) {
+			continue;
+		}
+		const final = h.location.cleaned ?? h.location.original;
+		console.log('unwrapLink', { original: link, final });
+		return final;
+	}
+	throw new Error(`unable to determine "final" hop`);
+}
+
 const allowedUsernames = ['NWSNewYorkNY', 'NWSAnchorage', 'NWSMelbourne'];
+
+const renderers: Record<string, typeof renderJSONFeed> = {
+	json: renderJSONFeed,
+	rss: renderAtomFeed,
+};
+
+async function refreshAllProfiles(env: Env, ctx: ExecutionContext): Promise<void> {
+	await useBrowser(env, ctx, async (b) => {
+		const sem = pLimit(2);
+		await reportHealthcheck(env, ctx, env.HEALTHCHECK_ID, async () => {
+			await Promise.all(allowedUsernames.map((username) => sem(() => updateTweetsCache(env, b, username))));
+		});
+	});
+}
 
 export default {
 	async scheduled(ctrl, env, ctx) {
-		ctx.waitUntil(
-			useBrowser(env, ctx, async (b) => {
-				const sem = pLimit(2);
-				await reportHealthcheck(env, ctx, env.HEALTHCHECK_ID, async () => {
-					await Promise.all(allowedUsernames.map((username) => sem(() => updateTweetsCache(env, b, username))));
-				});
-			})
-		);
+		await refreshAllProfiles(env, ctx);
 	},
 	async fetch(request, env, ctx): Promise<Response> {
 		const baseu = new URL(request.url);
 
-		if (baseu.pathname === '/__cf.json') {
-			return new Response(
-				JSON.stringify(
-					{
-						...request.cf,
-						headers: [...request.headers.entries()],
-					},
-					null,
-					2
-				),
-				{
-					headers: {
-						'Content-Type': 'application/json',
-					},
-				}
-			);
+		if (baseu.pathname === '/bcdbe3d8-d9df-4885-a896-13d966a5a936') {
+			ctx.waitUntil(refreshAllProfiles(env, ctx));
+			return Response.json({ ok: true });
 		}
-		if (baseu.pathname.charAt(0) === '/' && baseu.pathname.endsWith('.json')) {
-			const username = baseu.pathname.slice(1).slice(0, -5);
+
+		const extension = baseu.pathname.split('.').pop();
+		const renderer = renderers[extension ?? 'never'];
+		if (baseu.pathname.charAt(0) === '/' && typeof renderer === 'function') {
+			const username = baseu.pathname.slice(1).slice(0, -(extension!.length + 1));
 			const allowedUsernameIdx = allowedUsernames.map((au) => au.toLowerCase()).indexOf(username.toLowerCase());
 			if (allowedUsernameIdx >= 0) {
+				const debug = baseu.searchParams.has('debug');
 				const properUsername = allowedUsernames[allowedUsernameIdx];
+				const [timeline, profile] = await Promise.all([
+					env.tweet_cache.get<TweetPtr[]>(timelineDataKey(properUsername), 'json'),
+					env.tweet_cache.get<Profile>(profileDataKey(properUsername), 'json'),
+				]);
+				if (timeline && profile) {
+					const tweets = await Promise.all(
+						timeline.map(async (ptr): Promise<Tweet> => {
+							const [ptrType, ptrValue] = ptr;
+							const repost = ptrType === 'repost';
+							const tweet = await env.tweet_cache.get<Omit<Tweet, 'repost'>>(ptrValue, 'json');
+							if (!tweet) {
+								throw new Error(`broken tweet pointer`);
+							}
+							return {
+								...tweet,
+								repost,
+							} as Tweet;
+						})
+					);
+					return renderer(
+						properUsername,
+						{
+							profile,
+							tweets,
+						},
+						{ debug }
+					);
+				}
 				const cacheKey = `tweets:${properUsername}`;
 				let tweets: ExtractResult | null = await env.tweet_cache.get(cacheKey, 'json');
-
-				const debug = baseu.searchParams.has('debug');
-				if (baseu.searchParams.has('fresh') && request.headers.get('cf-connecting-ip') === '100.38.153.109') {
-					tweets = await useBrowser(env, ctx, (b) => {
-						return extractTweets(env, b, properUsername);
-					});
-				}
 				if (!tweets) {
 					return Response.json({ error: 'no tweets available' }, { status: 503 });
 				}
 
-				const jsonFeed = {
-					version: 'https://jsonfeed.org/version/1.1',
-					title: `@${properUsername}`,
-					home_page_url: `https://x.com/${properUsername}`,
-					feed_url: `https://x-rss.nkcmr.dev/${properUsername}.json`,
-					description: renderPlainText(tweets.profile.description_chunks),
-					items: [] as any[],
-				};
-
-				for (let t of tweets.tweets) {
-					if (t.repost) {
-						continue;
-					}
-					let textContent = renderPlainText(t.text_chunks);
-					let image: string | undefined;
-
-					// @ts-ignore
-					if (t.photos) {
-						// @ts-ignore
-						t.media = t.photos.map((p) => ({ type: 'photo', ...p }));
-						// @ts-ignore
-						delete t.photos;
-					}
-
-					// can delete in a bit
-					if (t.media.length > 0) {
-						const [top] = t.media;
-						if (top.type === 'photo') {
-							image = top.src;
-						} else if (top.type === 'video' && top.poster) {
-							image = top.poster;
-						}
-					}
-
-					const debugData = debug ? { tweets: t } : undefined;
-
-					jsonFeed.items.push({
-						id: t.link,
-						url: t.link,
-						date_published: t.timestamp,
-						// content_text: textContent,
-						content_html: renderHTML(t.text_chunks),
-						_x_rss_debug: debugData,
-						image: image,
-					});
-				}
-				return new Response(JSON.stringify(jsonFeed, null, 2), {
-					headers: {
-						'Content-Type': 'application/feed+json',
-					},
-				});
+				return renderer(properUsername, tweets, { debug });
 			}
+		}
+
+		if (/^\/[a-z0-9_]+\/status\/[0-9]+$/i.test(baseu.pathname)) {
+			const [, username, , tweetID] = baseu.pathname.split('/');
+			const t = await env.tweet_cache.get<Omit<Tweet, 'repost'>>(tweetDataKey(username.toLowerCase(), tweetID), 'json');
+			if (!t) {
+				return new Response('unknown tweet', { status: 404 });
+			}
+			const datetimefmt = Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'medium' });
+			return respondHTML(
+				'<!DOCTYPE html>\n' +
+					renderToString(
+						<html lang="en">
+							<head>
+								<meta charSet="utf-8" />
+								<meta name="viewport" content="width=device-width, initial-scale=1" />
+								<link
+									rel="stylesheet"
+									href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css"
+									referrerPolicy="no-referrer"
+								/>
+							</head>
+							<body>
+								<div style={{ width: '640px' }} className="container mx-auto p-8">
+									<article>
+										<div>
+											<a href={t.author.url}>
+												<img src={t.author.img} />
+												{t.author.name}
+											</a>
+										</div>
+										<br />
+										<hr />
+										<br />
+										<time dateTime={t.timestamp}>{datetimefmt.format(Date.parse(t.timestamp))} (UTC)</time>
+										<br />
+										{renderHTML(t.text_chunks)}
+										<br />
+										{t.media.map((tm, i) => (
+											<div key={i}>
+												{tm.type === 'photo' && <img src={tm.src} alt={tm.alt} title={tm.alt} />}
+												{tm.type === 'video' && (
+													<>
+														<video src={tm.src} poster={tm.poster} loop={tm.gif} autoPlay={tm.gif} muted={tm.gif} />
+													</>
+												)}
+											</div>
+										))}
+									</article>
+								</div>
+							</body>
+						</html>
+					)
+			);
 		}
 
 		return new Response('not found', { status: 404, headers: { 'Content-Type': 'text/plain' } });

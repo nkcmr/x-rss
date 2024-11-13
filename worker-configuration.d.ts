@@ -2,7 +2,7 @@
 
 interface Env {
 	tweet_cache: KVNamespace;
-	SCREENSHOTS: R2Bucket;
-	MAIN_BROWSER: Fetcher;
 	HEALTHCHECK_ID: string;
+	LINK_UNWRAP: Fetcher;
+	MAIN_BROWSER: Fetcher;
 }

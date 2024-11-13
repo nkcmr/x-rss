@@ -3,11 +3,12 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
-		"deploy": "wrangler deploy",
+		"deploy": "npm run tweet-extract && wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest",
 		"cf-typegen": "wrangler types",
+		"tweet-extract": "tsc -p ./tsconfig.extract.json && mv ./src/tweet-extract.js ./src/tweet-extract.js.txt",
 		"fe-bundle": "esbuild --bundle ./src/csr.tsx --outfile=./build/build.js --tree-shaking=true --minify --sourcemap=external",
 		"fe-build": "rm -rf build && mkdir build && npm run fe-bundle",
 		"fe-dev": "esbuild --bundle ./src/csr.tsx --outfile=./build/build.js --sourcemap=inline --watch"
@@ -23,9 +24,10 @@
 		"react-dom": "^18.3.1",
 		"typescript": "^5.5.2",
 		"vitest": "2.0.5",
-		"wrangler": "^3.60.3"
+		"wrangler": "^3.86.1"
 	},
 	"dependencies": {
+		"fast-xml-parser": "^4.5.0",
 		"p-limit": "^6.1.0"
 	}
 }
