@@ -116,10 +116,7 @@ async function extractTweet(tweetEl: Element): Promise<Tweet | null> {
 	(tweetEl as any).scrollIntoView();
 	await sleep(500);
 	const tweetTextEl = tweetEl.querySelector('[data-testid=tweetText]');
-	if (!tweetTextEl) {
-		throw new Error('no tweet text found');
-	}
-	const textChunks = extractTextChunks(tweetTextEl);
+	const textChunks = tweetTextEl ? extractTextChunks(tweetTextEl) : [];
 
 	const authorImgEl = tweetEl.querySelector('[data-testid=Tweet-User-Avatar] img');
 	if (!authorImgEl) {
@@ -144,10 +141,9 @@ async function extractTweet(tweetEl: Element): Promise<Tweet | null> {
 	}
 
 	const media: Array<Tweet['media']['0']> = [];
-	const tweetPhoto = tweetEl.querySelector('[data-testid=tweetPhoto]');
-	if (tweetPhoto) {
-		const img = tweetPhoto.querySelector('img');
-		const video = tweetPhoto.querySelector('video');
+	for (let mediaEl of tweetEl.querySelectorAll('[data-testid=tweetPhoto]')) {
+		const img = mediaEl.querySelector('img');
+		const video = mediaEl.querySelector('video');
 		if (img) {
 			media.push({
 				type: 'photo',
@@ -155,12 +151,12 @@ async function extractTweet(tweetEl: Element): Promise<Tweet | null> {
 				alt: img.alt,
 			});
 		} else if (video) {
-			const isGif = [...tweetPhoto.querySelectorAll('span')].findIndex((el) => (el.textContent ?? '').toLowerCase() === 'gif') >= 0;
+			const gif = [...mediaEl.querySelectorAll('span')].findIndex((el) => (el.textContent ?? '').toLowerCase() === 'gif') >= 0;
 			media.push({
 				type: 'video',
 				src: video.src,
 				poster: video.poster,
-				gif: isGif,
+				gif,
 			});
 		}
 	}

@@ -17,6 +17,16 @@ function sleep(ms: number): Promise<void> {
 	});
 }
 
+const errMessage = (e: unknown): string => {
+	if (e instanceof Error === false) {
+		return `${e}`;
+	}
+	if (e.cause) {
+		return `${e.message}: ${errMessage(e.cause)}`;
+	}
+	return e.message;
+};
+
 async function extractTweets(env: Env, b: Browser, username: string): Promise<ExtractResult> {
 	let page: Page | null = null;
 	try {
@@ -84,6 +94,8 @@ async function extractTweets(env: Env, b: Browser, username: string): Promise<Ex
 				})
 			),
 		};
+	} catch (e) {
+		throw new Error(`failed to extract tweets for ${username}`, { cause: e });
 	} finally {
 		await page?.close();
 	}
@@ -137,28 +149,32 @@ function profileDataKey(username: string): string {
 type TweetPtr = ['repost' | 'post', string];
 
 async function updateTweetsCache(env: Env, b: Browser, username: string): Promise<void> {
-	const result = await extractTweets(env, b, username);
-	const timeline = await Promise.all(
-		result.tweets.map(async (tweet): Promise<TweetPtr> => {
-			const [username, id] = tweetLinkExplode(tweet.link);
-			if (!username || !id) {
-				throw new Error(`failed to explode tweet link: ${tweet.link}`);
-			}
+	try {
+		const result = await extractTweets(env, b, username);
+		const timeline = await Promise.all(
+			result.tweets.map(async (tweet): Promise<TweetPtr> => {
+				const [username, id] = tweetLinkExplode(tweet.link);
+				if (!username || !id) {
+					throw new Error(`failed to explode tweet link: ${tweet.link}`);
+				}
 
-			const isRepost = tweet.repost;
-			delete tweet.repost;
-			const key = tweetDataKey(username, id);
-			return env.tweet_cache.put(key, JSON.stringify(tweet)).then(() => {
-				return [isRepost ? 'repost' : 'post', key];
-			});
-		})
-	);
-	console.log('got tweets, saving to cache', { username });
-	await Promise.all([
-		env.tweet_cache.put(profileDataKey(username), JSON.stringify(result.profile)),
-		env.tweet_cache.put(`tweets:${username}`, JSON.stringify(result)),
-		env.tweet_cache.put(timelineDataKey(username), JSON.stringify(timeline)),
-	]);
+				const isRepost = tweet.repost;
+				delete tweet.repost;
+				const key = tweetDataKey(username, id);
+				return env.tweet_cache.put(key, JSON.stringify(tweet)).then(() => {
+					return [isRepost ? 'repost' : 'post', key];
+				});
+			})
+		);
+		console.log('got tweets, saving to cache', { username });
+		await Promise.all([
+			env.tweet_cache.put(profileDataKey(username), JSON.stringify(result.profile)),
+			env.tweet_cache.put(`tweets:${username}`, JSON.stringify(result)),
+			env.tweet_cache.put(timelineDataKey(username), JSON.stringify(timeline)),
+		]);
+	} catch (e) {
+		console.error(`failed to update tweets data for ${username}: ${errMessage(e)}`);
+	}
 }
 
 function renderPlainText(chunks: TextChunk[]): string {
@@ -433,7 +449,24 @@ function respondHTML(body: BodyInit) {
 	});
 }
 
+async function sha256(message: string): Promise<string> {
+	const msgUint8 = new TextEncoder().encode(message);
+	const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+	const hashArray = Array.from(new Uint8Array(hashBuffer));
+	const hashHex = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+	return hashHex;
+}
+
+async function linkUnwrapResultData(link: string): Promise<string> {
+	return `link-unwrap/hash:${await sha256('salt:2e360ca8-cb6b-455e-9168-d45c23a5d8be' + link)}`;
+}
+
 async function unwrapLink(env: Env, link: string): Promise<string> {
+	const key = await linkUnwrapResultData(link);
+	const savedValue = await env.tweet_cache.get(key, 'text');
+	if (savedValue) {
+		return atob(savedValue);
+	}
 	type LinkHop =
 		| {
 				seq: number;
@@ -457,7 +490,10 @@ async function unwrapLink(env: Env, link: string): Promise<string> {
 			continue;
 		}
 		const final = h.location.cleaned ?? h.location.original;
-		console.log('unwrapLink', { original: link, final });
+		await env.tweet_cache.put(key, btoa(final), {
+			expirationTtl: 1209600, // 2 weeks
+		});
+		console.log('unwrapLink', { original: link, final, key });
 		return final;
 	}
 	throw new Error(`unable to determine "final" hop`);
@@ -470,18 +506,33 @@ const renderers: Record<string, typeof renderJSONFeed> = {
 	rss: renderAtomFeed,
 };
 
-async function refreshAllProfiles(env: Env, ctx: ExecutionContext): Promise<void> {
+function singleflight<R, A extends unknown[]>(fn: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
+	let activePromise: Promise<R> | null = null;
+	return (...args: A) => {
+		if (activePromise) {
+			console.log('prevented double execution');
+			return activePromise;
+		}
+		activePromise = fn(...args).finally(() => {
+			activePromise = null;
+		});
+		return activePromise;
+	};
+}
+
+const refreshAllProfiles = singleflight(async (env: Env, ctx: ExecutionContext): Promise<void> => {
 	await useBrowser(env, ctx, async (b) => {
-		const sem = pLimit(2);
+		const sem = pLimit(5);
 		await reportHealthcheck(env, ctx, env.HEALTHCHECK_ID, async () => {
 			await Promise.all(allowedUsernames.map((username) => sem(() => updateTweetsCache(env, b, username))));
 		});
 	});
-}
+	console.log('refreshAllProfiles: done');
+});
 
 export default {
 	async scheduled(ctrl, env, ctx) {
-		await refreshAllProfiles(env, ctx);
+		ctx.waitUntil(refreshAllProfiles(env, ctx));
 	},
 	async fetch(request, env, ctx): Promise<Response> {
 		const baseu = new URL(request.url);

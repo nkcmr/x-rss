@@ -106,10 +106,7 @@ async function extractTweet(tweetEl) {
     tweetEl.scrollIntoView();
     await sleep(500);
     const tweetTextEl = tweetEl.querySelector('[data-testid=tweetText]');
-    if (!tweetTextEl) {
-        throw new Error('no tweet text found');
-    }
-    const textChunks = extractTextChunks(tweetTextEl);
+    const textChunks = tweetTextEl ? extractTextChunks(tweetTextEl) : [];
     const authorImgEl = tweetEl.querySelector('[data-testid=Tweet-User-Avatar] img');
     if (!authorImgEl) {
         throw new Error('missing user avatar element');
@@ -129,10 +126,9 @@ async function extractTweet(tweetEl) {
         throw new Error(`could not find tweet link as parent of <time>`);
     }
     const media = [];
-    const tweetPhoto = tweetEl.querySelector('[data-testid=tweetPhoto]');
-    if (tweetPhoto) {
-        const img = tweetPhoto.querySelector('img');
-        const video = tweetPhoto.querySelector('video');
+    for (let mediaEl of tweetEl.querySelectorAll('[data-testid=tweetPhoto]')) {
+        const img = mediaEl.querySelector('img');
+        const video = mediaEl.querySelector('video');
         if (img) {
             media.push({
                 type: 'photo',
@@ -141,12 +137,12 @@ async function extractTweet(tweetEl) {
             });
         }
         else if (video) {
-            const isGif = [...tweetPhoto.querySelectorAll('span')].findIndex((el) => (el.textContent ?? '').toLowerCase() === 'gif') >= 0;
+            const gif = [...mediaEl.querySelectorAll('span')].findIndex((el) => (el.textContent ?? '').toLowerCase() === 'gif') >= 0;
             media.push({
                 type: 'video',
                 src: video.src,
                 poster: video.poster,
-                gif: isGif,
+                gif,
             });
         }
     }

@@ -8,7 +8,7 @@
 		"start": "wrangler dev",
 		"test": "vitest",
 		"cf-typegen": "wrangler types",
-		"tweet-extract": "tsc -p ./tsconfig.extract.json && mv ./src/tweet-extract.js ./src/tweet-extract.js.txt",
+		"tweet-extract": "tsc -p ./tsconfig.extract.json && rm -vf ./src/tweet-extract.js.txt && mv ./src/tweet-extract.js ./src/tweet-extract.js.txt",
 		"fe-bundle": "esbuild --bundle ./src/csr.tsx --outfile=./build/build.js --tree-shaking=true --minify --sourcemap=external",
 		"fe-build": "rm -rf build && mkdir build && npm run fe-bundle",
 		"fe-dev": "esbuild --bundle ./src/csr.tsx --outfile=./build/build.js --sourcemap=inline --watch"
