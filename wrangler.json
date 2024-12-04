@@ -1,0 +1,40 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "x-rss",
+	"main": "src/index.tsx",
+	"compatibility_date": "2024-10-22",
+	"compatibility_flags": ["nodejs_compat"],
+	"upload_source_maps": true,
+	"env": {
+		"production": {
+			"name": "x-rss",
+			"route": {
+				"pattern": "x-rss.nkcmr.dev",
+				"custom_domain": true
+			},
+			"browser": {
+				"binding": "MAIN_BROWSER"
+			},
+			"triggers": {
+				"crons": ["1,16,31,46 * * * *"]
+			},
+			"observability": {
+				"enabled": true
+			},
+			"kv_namespaces": [
+				{
+					"binding": "tweet_cache",
+					"id": "a38c17c47f3248b8b622b64e8abd4cea",
+					"preview_id": "03108c239054419799804a88281fbd82"
+				}
+			],
+			"services": [
+				{
+					"binding": "LINK_UNWRAP",
+					"service": "notrack-link",
+					"entrypoint": "UnwrapAPI"
+				}
+			]
+		}
+	}
+}

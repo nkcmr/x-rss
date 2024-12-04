@@ -3,7 +3,7 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
-		"deploy": "npm run tweet-extract && wrangler deploy",
+		"deploy": "npm run tweet-extract && wrangler -j deploy -e production",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"test": "vitest",
