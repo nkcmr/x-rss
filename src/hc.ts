@@ -20,8 +20,8 @@ async function reliableFetch(env: Env, input: RequestInfo, init?: RequestInit<Re
 	headers.set('User-Agent', `x-rss.reliableFetch`);
 	init2.headers = headers;
 	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+		const ac = new AbortController();
 		try {
-			const ac = new AbortController();
 			const response = await Promise.race([
 				fetch(input, {
 					...init2,
@@ -36,12 +36,15 @@ async function reliableFetch(env: Env, input: RequestInfo, init?: RequestInit<Re
 				continue;
 			}
 			if (!response.ok) {
+				await sleep(100);
 				console.log('reliableFetch: non-ok reponse');
 				continue;
 			}
 			return true;
 		} catch (e) {
 			console.log(`reliableFetch: fetch failure: ${e}`);
+		} finally {
+			ac.abort();
 		}
 	}
 	return false;
@@ -58,31 +61,3 @@ async function reportFinish(env: Env, id: string): Promise<void> {
 		throw new Error(`healtcheck.io: reportFinish failed`);
 	}
 }
-
-// async function reportStart(env: Env, id: string): Promise<void> {
-// 	if (!id) {
-// 		console.warn('healtcheck/reportStart: healthcheck id not configured');
-// 		return;
-// 	}
-// 	const ok = await reliableFetch(env, `https://hc-ping.com/${id}/start`);
-// 	if (!ok) {
-// 		throw new Error(`healtcheck.io: reportStart failed`);
-// 	}
-// }
-
-// async function reportFailure(env: Env, id: string, logs?: string): Promise<void> {
-// 	if (!id) {
-// 		console.warn('healtcheck/reportFailure: healthcheck id not configured');
-// 		return;
-// 	}
-// 	const init: RequestInit = {};
-// 	if (logs) {
-// 		init.method = 'POST';
-// 		init.body = JSON.stringify({ logs });
-// 		init.headers = { 'Content-Type': 'application/json' };
-// 	}
-// 	const ok = await reliableFetch(env, `https://hc-ping.com/${id}/fail`, init);
-// 	if (!ok) {
-// 		throw new Error(`healtcheck.io: reportFailure failed`);
-// 	}
-// }

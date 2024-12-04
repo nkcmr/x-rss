@@ -5,7 +5,11 @@ import { Fragment, ReactNode } from 'react';
 import { renderToString } from 'react-dom/server';
 import { reportHealthcheck } from './hc';
 import { Profile, TextChunk, Tweet } from './tweet';
+
+// the "tweet-extract" script is actually loaded here as text and injected into
+// the browser for it to run browser-side.
 import tweetExtractJS from './tweet-extract.js.txt';
+
 type ExtractResult = {
 	profile: Profile;
 	tweets: Tweet[];
@@ -578,13 +582,7 @@ export default {
 						{ debug }
 					);
 				}
-				const cacheKey = `tweets:${properUsername}`;
-				let tweets: ExtractResult | null = await env.tweet_cache.get(cacheKey, 'json');
-				if (!tweets) {
-					return Response.json({ error: 'no tweets available' }, { status: 503 });
-				}
-
-				return renderer(properUsername, tweets, { debug });
+				return Response.json({ error: 'no tweets available' }, { status: 503 });
 			}
 		}
 
