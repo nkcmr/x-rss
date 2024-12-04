@@ -1,5 +1,5 @@
 #:schema node_modules/wrangler/config-schema.json
-name = "rss-view"
+name = "x-rss"
 main = "src/index.tsx"
 compatibility_date = "2024-10-22"
 compatibility_flags = ["nodejs_compat"]
@@ -111,7 +111,7 @@ preview_id = "03108c239054419799804a88281fbd82"
 
 [[services]]
 binding = "LINK_UNWRAP"
-service = "link-unwrap"
+service = "notrack-link"
 entrypoint = "UnwrapAPI"
 
 # Bind another Worker service. Use this binding to call another Worker without network overhead.
